@@ -1,4 +1,3 @@
-
 import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
@@ -8,11 +7,11 @@ import {
   Bell,
   Building2,
   CheckCircle2,
-  ChevronDown,
   CircleHelp,
   Clock3,
   FileText,
   Filter,
+  History,
   LayoutDashboard,
   LoaderCircle,
   Menu,
@@ -22,6 +21,8 @@ import {
   ShieldCheck,
   Users,
   X,
+  Check,
+  XCircle,
 } from "lucide-react";
 import {
   Bar,
@@ -41,6 +42,10 @@ import {
   getDashboardStats,
   getInstitutions,
   updateCaseStatus,
+  getOverlapAlerts,
+  getCaseHistory,
+  reviewOverlap,
+  scanOverlaps,
 } from "../services/api";
 
 const STATUS_OPTIONS = [
@@ -342,6 +347,185 @@ function NewCaseModal({ onClose, onCreated }) {
   );
 }
 
+
+function formatDateTime(value) {
+  if (!value) return "Time not recorded";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Time not recorded";
+
+  return new Intl.DateTimeFormat("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(date);
+}
+
+function HistoryModal({ caseItem, history, loading, error, onClose }) {
+  const actionTitle = (entry) => {
+    switch (entry.action_type) {
+      case "CASE_CREATED":
+        return "Complaint registered";
+      case "STATUS_CHANGED":
+        return "Complaint status changed";
+      case "OVERLAP_REVIEW":
+        return "Overlap review recorded";
+      default:
+        return formatLabel(entry.action_type || "Case activity");
+    }
+  };
+
+  const actionDescription = (entry) => {
+    if (entry.action_type === "STATUS_CHANGED") {
+      if (entry.previous_status && entry.new_status) {
+        return `${formatLabel(entry.previous_status)} → ${formatLabel(entry.new_status)}`;
+      }
+      return entry.new_status
+        ? `Status recorded as ${formatLabel(entry.new_status)}`
+        : "Status change recorded";
+    }
+
+    if (entry.action_type === "CASE_CREATED" && entry.new_status) {
+      return `Initial status recorded as ${formatLabel(entry.new_status)}`;
+    }
+
+    return "";
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-slate-950/50 p-4"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="case-history-title"
+        className="my-auto max-h-[90vh] w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-2xl"
+      >
+        <header className="flex items-start justify-between gap-4 border-b border-slate-100 p-5 sm:p-6">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="rounded-xl bg-blue-50 p-2.5 text-blue-700">
+              <History size={21} />
+            </div>
+            <div className="min-w-0">
+              <h2 id="case-history-title" className="text-lg font-bold text-slate-900">
+                Case history
+              </h2>
+              <p className="mt-1 break-words text-sm font-semibold text-blue-700">
+                {caseItem.case_number}
+              </p>
+              <p className="mt-1 text-sm text-slate-500">
+                {caseItem.subject}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close case history"
+            className="shrink-0 rounded-lg p-2 text-slate-500 hover:bg-slate-100"
+          >
+            <X size={20} />
+          </button>
+        </header>
+
+        <div className="max-h-[calc(90vh-100px)] overflow-y-auto p-5 sm:p-6">
+          {loading ? (
+            <div className="flex items-center justify-center gap-3 py-12 text-sm text-slate-500">
+              <LoaderCircle size={20} className="animate-spin text-blue-600" />
+              Loading case history...
+            </div>
+          ) : error ? (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-4">
+              <p role="alert" className="text-sm text-rose-700">{error}</p>
+            </div>
+          ) : history.length === 0 ? (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-center">
+              <History size={24} className="mx-auto text-slate-400" />
+              <p className="mt-3 text-sm font-semibold text-slate-700">
+                No history entries found
+              </p>
+              <p className="mt-1 text-sm text-slate-500">
+                Recorded actions for this complaint will appear here.
+              </p>
+            </div>
+          ) : (
+            <ol className="space-y-0">
+              {history.map((entry, index) => (
+                <li key={entry.id ?? `${entry.action_type}-${entry.created_at}-${index}`} className="relative flex gap-4 pb-7 last:pb-0">
+                  {index < history.length - 1 && (
+                    <span className="absolute left-[15px] top-8 h-[calc(100%-16px)] w-px bg-slate-200" />
+                  )}
+                  <span className={`relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
+                    entry.action_type === "OVERLAP_REVIEW"
+                      ? "bg-violet-100 text-violet-700"
+                      : entry.action_type === "STATUS_CHANGED"
+                        ? "bg-amber-100 text-amber-700"
+                        : "bg-blue-100 text-blue-700"
+                  }`}>
+                    {entry.action_type === "OVERLAP_REVIEW" ? (
+                      <ShieldCheck size={16} />
+                    ) : entry.action_type === "STATUS_CHANGED" ? (
+                      <RefreshCw size={16} />
+                    ) : (
+                      <FileText size={16} />
+                    )}
+                  </span>
+                  <div className="min-w-0 flex-1 rounded-xl border border-slate-200 p-4">
+                    <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start">
+                      <h3 className="text-sm font-semibold text-slate-900">
+                        {actionTitle(entry)}
+                      </h3>
+                      <time className="shrink-0 text-xs text-slate-400">
+                        {formatDateTime(entry.created_at)}
+                      </time>
+                    </div>
+
+                    {actionDescription(entry) && (
+                      <p className="mt-2 text-sm font-medium text-slate-700">
+                        {actionDescription(entry)}
+                      </p>
+                    )}
+
+                    {entry.notes && (
+                      <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">
+                        {entry.notes}
+                      </p>
+                    )}
+
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      {entry.new_status && (
+                        <StatusBadge status={entry.new_status} />
+                      )}
+                      {entry.performed_by_name && (
+                        <span className="text-xs text-slate-500">
+                          Recorded by {entry.performed_by_name}
+                        </span>
+                      )}
+                      {!entry.performed_by_name && entry.performed_by && (
+                        <span className="text-xs text-slate-500">
+                          Officer ID: {entry.performed_by}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
   const [cases, setCases] = useState([]);
@@ -355,16 +539,28 @@ export default function Dashboard() {
   const [updatingId, setUpdatingId] = useState(null);
   const [updateError, setUpdateError] = useState("");
   const [mobileNav, setMobileNav] = useState(false);
+  const [overlapAlerts, setOverlapAlerts] = useState([]);
+  const [reviewingAlertId, setReviewingAlertId] = useState(null);
+  const [reviewError, setReviewError] = useState("");
+  const [reviewNotes, setReviewNotes] = useState({});
+  const [scanning, setScanning] = useState(false);
+  const [scanMessage, setScanMessage] = useState("");
+  const [historyCase, setHistoryCase] = useState(null);
+  const [caseHistory, setCaseHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
 
   async function loadData() {
     setError("");
     try {
-      const [nextStats, nextCases] = await Promise.all([
+      const [nextStats, nextCases, nextAlerts] = await Promise.all([
         getDashboardStats(),
         getCases(),
+        getOverlapAlerts("ALL"),
       ]);
       setStats(nextStats);
       setCases(nextCases);
+      setOverlapAlerts(nextAlerts);
     } catch (err) {
       setError(
         err.response?.data?.message ||
@@ -378,6 +574,78 @@ export default function Dashboard() {
   useEffect(() => {
     loadData();
   }, []);
+
+  async function handleOverlapReview(alert, decision) {
+    setReviewingAlertId(alert.alert_id);
+    setReviewError("");
+
+    try {
+      await reviewOverlap(
+        alert.alert_id,
+        decision,
+        reviewNotes[alert.alert_id] || ""
+      );
+      await loadData();
+    } catch (err) {
+      setReviewError(
+        err.response?.data?.message || "Could not save the review."
+      );
+    } finally {
+      setReviewingAlertId(null);
+    }
+  }
+
+  async function handleOverlapScan() {
+    setScanning(true);
+    setScanMessage("");
+    setReviewError("");
+
+    try {
+      const result = await scanOverlaps();
+      setScanMessage(
+        `Scan complete: ${result.cases_scanned} cases scanned; ${result.candidates_found} candidate pair(s) found.`
+      );
+      await loadData();
+    } catch (err) {
+      setReviewError(
+        err.response?.data?.message || "Overlap scan failed."
+      );
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  async function handleViewHistory(item) {
+    setHistoryCase(item);
+    setCaseHistory([]);
+    setHistoryError("");
+    setHistoryLoading(true);
+
+    try {
+      const result = await getCaseHistory(item.id);
+      // The history API returns { success, data: { case, count, history } }.
+      // The fallback also tolerates an API helper that returns the nested data object.
+      const payload = result?.data?.history
+        ? result.data
+        : result?.history
+          ? result
+          : null;
+
+      if (!payload) {
+        throw new Error("The history API returned an unexpected response.");
+      }
+
+      setCaseHistory(Array.isArray(payload.history) ? payload.history : []);
+    } catch (err) {
+      setHistoryError(
+        err.response?.data?.message ||
+          err.message ||
+          "Could not load case history. Please try again."
+      );
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
 
   const filteredCases = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -408,20 +676,6 @@ export default function Dashboard() {
 
   const uniqueBureaus = [...new Set(cases.map((item) => item.bureau_name))];
 
-  const possibleOverlaps = useMemo(() => {
-    const groups = new Map();
-
-    cases.forEach((item) => {
-      if (!groups.has(item.permanent_id)) groups.set(item.permanent_id, []);
-      groups.get(item.permanent_id).push(item);
-    });
-
-    return [...groups.values()].filter(
-      (group) =>
-        new Set(group.map((item) => item.bureau_name)).size > 1 &&
-        group.length > 1
-    );
-  }, [cases]);
 
   async function handleStatusChange(item, nextStatus) {
     setUpdatingId(item.id);
@@ -493,9 +747,9 @@ export default function Dashboard() {
               className="flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-medium text-slate-600 hover:bg-slate-50"
             >
               <AlertTriangle size={18} /> Overlap review
-              {possibleOverlaps.length > 0 && (
+              {overlapAlerts.some((alert) => alert.alert_status === "PENDING") && (
                 <span className="ml-auto rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-700">
-                  {possibleOverlaps.length}
+                  {overlapAlerts.filter((alert) => alert.alert_status === "PENDING").length}
                 </span>
               )}
             </a>
@@ -561,7 +815,7 @@ export default function Dashboard() {
                 title="Notifications"
               >
                 <Bell size={18} />
-                {possibleOverlaps.length > 0 && (
+                {overlapAlerts.some((alert) => alert.alert_status === "PENDING") && (
                   <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-rose-500" />
                 )}
               </button>
@@ -774,74 +1028,184 @@ export default function Dashboard() {
                   id="overlaps"
                   className="rounded-2xl border border-amber-200 bg-amber-50/70 p-5"
                 >
-                  <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                  <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
                     <div className="flex items-start gap-3">
                       <div className="rounded-xl bg-amber-100 p-2.5 text-amber-700">
                         <AlertTriangle size={21} />
                       </div>
                       <div>
                         <h3 className="font-bold text-slate-900">
-                          Cross-bureau review candidates
+                          Cross-bureau overlap review
                         </h3>
                         <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
-                          Cases from the same institution that appear across
-                          different bureaus. These are review candidates, not
-                          confirmed duplicates.
+                          Review saved candidate pairs, their text-similarity scores,
+                          and the evidence behind each flag. Similarity is not proof
+                          of duplication; an officer makes the final decision.
                         </p>
                       </div>
                     </div>
-                    <span className="w-fit rounded-full border border-amber-200 bg-white px-3 py-1.5 text-xs font-semibold text-amber-800">
-                      {possibleOverlaps.length} institution group(s)
-                    </span>
+                    <button
+                      onClick={handleOverlapScan}
+                      disabled={scanning}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                    >
+                      <RefreshCw size={16} className={scanning ? "animate-spin" : ""} />
+                      {scanning ? "Scanning..." : "Run overlap scan"}
+                    </button>
                   </div>
 
-                  {possibleOverlaps.length === 0 ? (
-                    <p className="mt-4 rounded-xl bg-white/70 p-4 text-sm text-slate-500">
-                      No cross-bureau candidates found in the loaded cases.
+                  {scanMessage && (
+                    <p className="mt-4 rounded-lg bg-white p-3 text-sm text-emerald-700">
+                      {scanMessage}
                     </p>
+                  )}
+
+                  {reviewError && (
+                    <p role="alert" className="mt-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-700">
+                      {reviewError}
+                    </p>
+                  )}
+
+                  {overlapAlerts.length === 0 ? (
+                    <div className="mt-4 rounded-xl border border-amber-200 bg-white p-5 text-sm text-slate-500">
+                      No saved alerts yet. Run an overlap scan to look for candidate pairs.
+                    </div>
                   ) : (
-                    <div className="mt-4 grid gap-3 lg:grid-cols-2">
-                      {possibleOverlaps.map((group) => (
-                        <div
-                          key={group[0].permanent_id}
-                          className="rounded-xl border border-amber-200/80 bg-white p-4"
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <p className="font-semibold text-slate-900">
-                                {group[0].institution_name}
-                              </p>
-                              <p className="mt-1 text-xs text-slate-500">
-                                Permanent ID: {group[0].permanent_id}
-                              </p>
-                            </div>
-                            <AlertTriangle
-                              size={18}
-                              className="shrink-0 text-amber-600"
-                            />
-                          </div>
-                          <div className="mt-3 space-y-2">
-                            {group.map((item) => (
-                              <div
-                                key={item.id}
-                                className="rounded-lg bg-slate-50 p-3"
-                              >
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                  <span className="text-xs font-semibold text-blue-700">
-                                    {item.case_number}
-                                  </span>
-                                  <span className="text-xs text-slate-500">
-                                    {item.bureau_name}
-                                  </span>
-                                </div>
-                                <p className="mt-1 text-sm font-medium text-slate-800">
-                                  {item.subject}
+                    <div className="mt-5 space-y-4">
+                      {overlapAlerts.map((alert) => {
+                        const explanation =
+                          typeof alert.explanation === "object" && alert.explanation
+                            ? alert.explanation
+                            : {};
+                        const isPending = alert.alert_status === "PENDING";
+                        const score = Number(alert.confidence_score || 0);
+
+                        return (
+                          <article
+                            key={alert.alert_id}
+                            className="rounded-xl border border-slate-200 bg-white p-4"
+                          >
+                            <div className="flex flex-col justify-between gap-3 sm:flex-row">
+                              <div>
+                                <p className="font-semibold text-slate-900">
+                                  {alert.institution_name}
+                                </p>
+                                <p className="mt-1 text-xs text-slate-500">
+                                  Permanent ID: {alert.permanent_id}
                                 </p>
                               </div>
-                            ))}
-                          </div>
-                        </div>
-                      ))}
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700">
+                                  Text similarity: {score}/100
+                                </span>
+                                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                                  isPending
+                                    ? "bg-amber-100 text-amber-800"
+                                    : alert.alert_status === "DISMISSED"
+                                      ? "bg-slate-100 text-slate-600"
+                                      : "bg-emerald-100 text-emerald-800"
+                                }`}>
+                                  {formatLabel(alert.alert_status)}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="mt-4 grid gap-3 md:grid-cols-2">
+                              {[
+                                {
+                                  number: alert.case_number,
+                                  subject: alert.subject,
+                                  bureau: alert.bureau_name,
+                                },
+                                {
+                                  number: alert.related_case_number,
+                                  subject: alert.related_subject,
+                                  bureau: alert.related_bureau,
+                                },
+                              ].map((item) => (
+                                <div key={item.number} className="rounded-lg bg-slate-50 p-3">
+                                  <p className="text-xs font-semibold text-blue-700">{item.number}</p>
+                                  <p className="mt-1 text-sm font-medium text-slate-800">{item.subject}</p>
+                                  <p className="mt-2 text-xs text-slate-500">Bureau: {item.bureau}</p>
+                                </div>
+                              ))}
+                            </div>
+
+                            <div className="mt-4">
+                              <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                                Why this was flagged
+                              </p>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {(explanation.explanation || []).map((reason) => (
+                                  <span key={reason} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600">
+                                    {reason}
+                                  </span>
+                                ))}
+                              </div>
+                              {(explanation.matching_terms || []).length > 0 && (
+                                <p className="mt-3 text-sm text-slate-600">
+                                  Matching terms:{" "}
+                                  <span className="font-medium text-slate-800">
+                                    {explanation.matching_terms.join(", ")}
+                                  </span>
+                                </p>
+                              )}
+                              <p className="mt-2 text-xs text-slate-400">
+                                This score measures lexical similarity, not the probability of a duplicate.
+                              </p>
+                            </div>
+
+                            {isPending ? (
+                              <div className="mt-4 border-t border-slate-100 pt-4">
+                                <label className="block text-xs font-semibold text-slate-600">
+                                  Review notes (optional)
+                                  <textarea
+                                    value={reviewNotes[alert.alert_id] || ""}
+                                    onChange={(event) =>
+                                      setReviewNotes((previous) => ({
+                                        ...previous,
+                                        [alert.alert_id]: event.target.value,
+                                      }))
+                                    }
+                                    rows={2}
+                                    maxLength={1000}
+                                    placeholder="Explain your decision..."
+                                    className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                                  />
+                                </label>
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                  <button
+                                    disabled={reviewingAlertId === alert.alert_id}
+                                    onClick={() => handleOverlapReview(alert, "CONFIRMED")}
+                                    className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                                  >
+                                    <CheckCircle2 size={15} /> Confirm duplicate
+                                  </button>
+                                  <button
+                                    disabled={reviewingAlertId === alert.alert_id}
+                                    onClick={() => handleOverlapReview(alert, "RELATED")}
+                                    className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                                  >
+                                    <FileText size={15} /> Mark related
+                                  </button>
+                                  <button
+                                    disabled={reviewingAlertId === alert.alert_id}
+                                    onClick={() => handleOverlapReview(alert, "DISMISSED")}
+                                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                                  >
+                                    <XCircle size={15} /> Dismiss
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="mt-4 border-t border-slate-100 pt-3 text-xs text-slate-500">
+                                This alert has been reviewed. Saved status:{" "}
+                                <strong>{formatLabel(alert.alert_status)}</strong>.
+                              </p>
+                            )}
+                          </article>
+                        );
+                      })}
                     </div>
                   )}
                 </section>
@@ -944,7 +1308,7 @@ export default function Dashboard() {
                   )}
 
                   <div className="overflow-x-auto">
-                    <table className="w-full min-w-[950px] text-left">
+                    <table className="w-full min-w-[1080px] text-left">
                       <thead className="bg-slate-50/80">
                         <tr className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
                           <th className="px-5 py-4">Case details</th>
@@ -954,6 +1318,7 @@ export default function Dashboard() {
                           <th className="px-4 py-4">Due date</th>
                           <th className="px-4 py-4">Status</th>
                           <th className="px-4 py-4">Update status</th>
+                          <th className="px-4 py-4">History</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
@@ -1019,12 +1384,22 @@ export default function Dashboard() {
                                 )}
                               </div>
                             </td>
+                            <td className="px-4 py-4">
+                              <button
+                                type="button"
+                                onClick={() => handleViewHistory(item)}
+                                className="inline-flex items-center gap-2 whitespace-nowrap rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
+                                aria-label={`View history for ${item.case_number}`}
+                              >
+                                <History size={15} /> View history
+                              </button>
+                            </td>
                           </tr>
                         ))}
                         {filteredCases.length === 0 && (
                           <tr>
                             <td
-                              colSpan={7}
+                              colSpan={8}
                               className="px-5 py-14 text-center text-sm text-slate-500"
                             >
                               No complaints match these filters.
@@ -1041,7 +1416,7 @@ export default function Dashboard() {
                     </span>
                     <span>
                       <span className="font-medium text-slate-700">
-                        {possibleOverlaps.length}
+                        {overlapAlerts.filter((alert) => alert.alert_status === "PENDING").length}
                       </span>{" "}
                       cross-bureau review candidate group(s)
                     </span>
@@ -1059,6 +1434,20 @@ export default function Dashboard() {
           </div>
         </main>
       </div>
+
+      {historyCase && (
+        <HistoryModal
+          caseItem={historyCase}
+          history={caseHistory}
+          loading={historyLoading}
+          error={historyError}
+          onClose={() => {
+            setHistoryCase(null);
+            setCaseHistory([]);
+            setHistoryError("");
+          }}
+        />
+      )}
 
       {showNewCase && (
         <NewCaseModal

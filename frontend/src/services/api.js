@@ -39,4 +39,31 @@ export const updateCaseStatus = async (id, status, notes = "") => {
   return response.data;
 };
 
+export const getOverlapAlerts = async (status = "ALL") => {
+  const response = await api.get("/overlaps", {
+    params: { status },
+  });
+  return response.data.data;
+};
+
+export const reviewOverlap = async (alertId, decision, notes = "") => {
+  const response = await api.patch(`/overlaps/${alertId}/review`, {
+    decision,
+    notes,
+  });
+  return response.data;
+};
+
+export const scanOverlaps = async () => {
+  const response = await api.post("/overlaps/scan");
+  return response.data.data;
+};
+
+export const getCaseHistory = async (caseId) => {
+  const response = await api.get(`/cases/${caseId}/history`);
+  return response.data;
+};
+
+
+
 export default api;

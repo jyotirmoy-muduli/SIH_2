@@ -6,6 +6,7 @@ import pool from "./config/db.js";
 import institutionsRouter from "./routes/institutions.js";
 import casesRouter from "./routes/cases.js";
 import dashboardRouter from "./routes/dashboard.js";
+import overlapsRouter from "./routes/overlaps.js";
 
 dotenv.config();
 
@@ -18,7 +19,7 @@ app.use(
   })
 );
 app.use(express.json());
-
+app.use("/api/overlaps", overlapsRouter);
 app.use("/api/institutions", institutionsRouter);
 app.use("/api/cases", casesRouter);
 app.use("/api/dashboard", dashboardRouter);
