@@ -21,7 +21,6 @@ import {
   ShieldCheck,
   Users,
   X,
-  Check,
   XCircle,
 } from "lucide-react";
 import {
@@ -46,6 +45,7 @@ import {
   getCaseHistory,
   reviewOverlap,
   scanOverlaps,
+  getSlaCases,
 } from "../services/api";
 
 const STATUS_OPTIONS = [
@@ -397,7 +397,7 @@ function HistoryModal({ caseItem, history, loading, error, onClose }) {
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-slate-950/50 p-4"
+      className="fixed inset-0 z-60 flex items-center justify-center overflow-y-auto bg-slate-950/50 p-4"
       role="presentation"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -418,7 +418,7 @@ function HistoryModal({ caseItem, history, loading, error, onClose }) {
               <h2 id="case-history-title" className="text-lg font-bold text-slate-900">
                 Case history
               </h2>
-              <p className="mt-1 break-words text-sm font-semibold text-blue-700">
+              <p className="mt-1 wrap-break-word text-sm font-semibold text-blue-700">
                 {caseItem.case_number}
               </p>
               <p className="mt-1 text-sm text-slate-500">
@@ -461,7 +461,7 @@ function HistoryModal({ caseItem, history, loading, error, onClose }) {
               {history.map((entry, index) => (
                 <li key={entry.id ?? `${entry.action_type}-${entry.created_at}-${index}`} className="relative flex gap-4 pb-7 last:pb-0">
                   {index < history.length - 1 && (
-                    <span className="absolute left-[15px] top-8 h-[calc(100%-16px)] w-px bg-slate-200" />
+                    <span className="absolute left-3.75 top-8 h-[calc(100%-16px)] w-px bg-slate-200" />
                   )}
                   <span className={`relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
                     entry.action_type === "OVERLAP_REVIEW"
@@ -495,7 +495,7 @@ function HistoryModal({ caseItem, history, loading, error, onClose }) {
                     )}
 
                     {entry.notes && (
-                      <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">
+                      <p className="mt-2 whitespace-pre-wrap wrap-break-word text-sm leading-6 text-slate-600">
                         {entry.notes}
                       </p>
                     )}
@@ -549,30 +549,54 @@ export default function Dashboard() {
   const [caseHistory, setCaseHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
+  const [slaSummary, setSlaSummary] = useState(null);
+  const [slaCases, setSlaCases] = useState([]);
+  const [slaFilter, setSlaFilter] = useState("ALL");
+  const [slaLoading, setSlaLoading] = useState(false);
+  const [slaError, setSlaError] = useState("");
 
   async function loadData() {
-    setError("");
+    const slaRequest = getSlaCases();
+    setSlaLoading(true);
+    setSlaError("");
+
     try {
       const [nextStats, nextCases, nextAlerts] = await Promise.all([
         getDashboardStats(),
         getCases(),
         getOverlapAlerts("ALL"),
       ]);
+
+      setError("");
       setStats(nextStats);
       setCases(nextCases);
       setOverlapAlerts(nextAlerts);
     } catch (err) {
       setError(
         err.response?.data?.message ||
-          "Could not connect to the API. Make sure your backend is running on port 5001."
+          "Could not connect to the API. Check that the backend is running on port 5001."
       );
     } finally {
       setLoading(false);
     }
+
+    try {
+      const nextSla = await slaRequest;
+      setSlaSummary(nextSla.summary);
+      setSlaCases(nextSla.data || []);
+    } catch (err) {
+      setSlaSummary(null);
+      setSlaCases([]);
+      setSlaError(
+        err.response?.data?.message || "Could not load SLA monitoring data."
+      );
+    } finally {
+      setSlaLoading(false);
+    }
   }
 
   useEffect(() => {
-    loadData();
+    void Promise.resolve().then(loadData);
   }, []);
 
   async function handleOverlapReview(alert, decision) {
@@ -900,6 +924,196 @@ export default function Dashboard() {
                     tone="bg-rose-50 text-rose-700"
                     trend="warning"
                   />
+                </section>
+
+                <section id="sla" className="space-y-4">
+                  <div>
+                    <h3 className="text-xl font-bold text-slate-900">
+                      SLA monitoring and smart escalation
+                    </h3>
+                    <p className="mt-1 text-sm text-slate-500">
+                      Monitor complaint deadlines and identify cases requiring officer attention.
+                    </p>
+                  </div>
+
+                  {slaError && (
+                    <p role="alert" className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700">
+                      {slaError}
+                    </p>
+                  )}
+
+                  <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                    {[
+                      {
+                        label: "On track",
+                        key: "on_track",
+                        style: "bg-emerald-50 text-emerald-700",
+                      },
+                      {
+                        label: "At risk",
+                        key: "at_risk",
+                        style: "bg-amber-50 text-amber-700",
+                      },
+                      {
+                        label: "Overdue",
+                        key: "overdue",
+                        style: "bg-rose-50 text-rose-700",
+                      },
+                      {
+                        label: "Escalation required",
+                        key: "escalation_required",
+                        style: "bg-violet-50 text-violet-700",
+                      },
+                    ].map((card) => (
+                      <button
+                        key={card.key}
+                        type="button"
+                        onClick={() =>
+                          setSlaFilter(
+                            card.key === "escalation_required"
+                              ? "OVERDUE"
+                              : card.key.toUpperCase()
+                          )
+                        }
+                        className="rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:border-blue-300"
+                      >
+                        <p className="text-sm font-medium text-slate-500">
+                          {card.label}
+                        </p>
+                        <p className={`mt-3 inline-flex rounded-lg px-3 py-1.5 text-2xl font-bold ${card.style}`}>
+                          {slaSummary?.[card.key] ?? 0}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+
+                  <article className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                    <div className="flex flex-col justify-between gap-3 border-b border-slate-100 p-5 sm:flex-row sm:items-center">
+                      <div>
+                        <h4 className="font-bold text-slate-900">SLA risk register</h4>
+                        <p className="mt-1 text-sm text-slate-500">
+                          Complaints ranked by deadline risk.
+                        </p>
+                      </div>
+
+                      <select
+                        value={slaFilter}
+                        onChange={(event) => setSlaFilter(event.target.value)}
+                        className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"
+                        aria-label="Filter SLA risk"
+                      >
+                        <option value="ALL">All risks</option>
+                        <option value="ON_TRACK">On track</option>
+                        <option value="AT_RISK">At risk</option>
+                        <option value="CRITICAL">Critical</option>
+                        <option value="OVERDUE">Overdue</option>
+                        <option value="COMPLETED">Completed</option>
+                        <option value="NO_DEADLINE">No deadline</option>
+                        <option value="INVALID_DEADLINE">Invalid deadline</option>
+                      </select>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[850px] text-left">
+                        <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                          <tr>
+                            <th className="px-5 py-3">Complaint</th>
+                            <th className="px-4 py-3">Institution</th>
+                            <th className="px-4 py-3">Due date</th>
+                            <th className="px-4 py-3">SLA risk</th>
+                            <th className="px-4 py-3">Recommended action</th>
+                          </tr>
+                        </thead>
+
+                        <tbody className="divide-y divide-slate-100">
+                          {slaLoading ? (
+                            <tr>
+                              <td colSpan={5} className="px-5 py-10 text-center text-sm text-slate-500">
+                                Loading SLA risks...
+                              </td>
+                            </tr>
+                          ) : (
+                            <>
+                              {slaCases
+                                .filter((item) =>
+                                  slaFilter === "ALL" ||
+                                  item.sla?.risk_level === slaFilter
+                                )
+                                .map((item) => {
+                                  const risk = item.sla?.risk_level || "NO_DEADLINE";
+                                  const riskStyle = {
+                                    ON_TRACK: "bg-emerald-50 text-emerald-700",
+                                    AT_RISK: "bg-amber-50 text-amber-700",
+                                    CRITICAL: "bg-orange-50 text-orange-700",
+                                    OVERDUE: "bg-rose-50 text-rose-700",
+                                    COMPLETED: "bg-slate-100 text-slate-700",
+                                    NO_DEADLINE: "bg-slate-100 text-slate-600",
+                                    INVALID_DEADLINE: "bg-violet-50 text-violet-700",
+                                  };
+
+                                  return (
+                                    <tr key={item.id} className="hover:bg-slate-50">
+                                      <td className="px-5 py-4">
+                                        <p className="text-xs font-semibold text-blue-700">
+                                          {item.case_number}
+                                        </p>
+                                        <p className="mt-1 text-sm font-medium text-slate-800">
+                                          {item.subject}
+                                        </p>
+                                      </td>
+
+                                      <td className="px-4 py-4 text-sm text-slate-600">
+                                        {item.institution_name}
+                                      </td>
+
+                                      <td className="px-4 py-4 text-sm text-slate-600">
+                                        {formatDate(item.due_date)}
+                                        {risk === "OVERDUE" && (
+                                          <p className="mt-1 text-xs font-semibold text-rose-600">
+                                            {Math.abs(item.sla?.hours_remaining ?? 0)} hours past due
+                                          </p>
+                                        )}
+                                        {["ON_TRACK", "AT_RISK", "CRITICAL"].includes(risk) && (
+                                          <p className="mt-1 text-xs text-slate-500">
+                                            {item.sla?.hours_remaining ?? "—"} hours remaining
+                                          </p>
+                                        )}
+                                      </td>
+
+                                      <td className="px-4 py-4">
+                                        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${riskStyle[risk] || "bg-slate-100 text-slate-600"}`}>
+                                          {formatLabel(risk)}
+                                        </span>
+                                        {item.sla?.escalation_required && (
+                                          <p className="mt-2 text-xs font-semibold text-rose-600">
+                                            Escalation required
+                                          </p>
+                                        )}
+                                      </td>
+
+                                      <td className="max-w-xs px-4 py-4 text-sm text-slate-600">
+                                        {item.sla?.recommended_action || "Review complaint"}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+
+                              {slaCases.filter((item) =>
+                                slaFilter === "ALL" ||
+                                item.sla?.risk_level === slaFilter
+                              ).length === 0 && (
+                                <tr>
+                                  <td colSpan={5} className="px-5 py-10 text-center text-sm text-slate-500">
+                                    No complaints match this SLA risk filter.
+                                  </td>
+                                </tr>
+                              )}
+                            </>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </article>
                 </section>
 
                 <section className="grid gap-6 xl:grid-cols-5">
@@ -1308,7 +1522,7 @@ export default function Dashboard() {
                   )}
 
                   <div className="overflow-x-auto">
-                    <table className="w-full min-w-[1080px] text-left">
+                    <table className="w-full min-w-270 text-left">
                       <thead className="bg-slate-50/80">
                         <tr className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
                           <th className="px-5 py-4">Case details</th>

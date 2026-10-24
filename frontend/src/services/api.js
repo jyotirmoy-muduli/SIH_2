@@ -65,5 +65,25 @@ export const getCaseHistory = async (caseId) => {
 };
 
 
+export const getSlaRisks = async (risk = "") => {
+  const response = await api.get("/sla", {
+    params: risk ? { risk } : {},
+  });
+
+  return response.data;
+};
+
+
+export const getSlaCases = async (risk = "ALL") => {
+  const params = risk !== "ALL" ? { risk } : {};
+  const response = await api.get("/sla", { params });
+
+  return {
+    summary: response.data.summary,
+    data: response.data.data,
+    count: response.data.count,
+  };
+};
+
 
 export default api;
