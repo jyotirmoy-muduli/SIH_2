@@ -4,19 +4,26 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "nodemon src/server.js"
+    "test": "node --test",
+    "dev": "nodemon src/server.js",
+    "seed": "node src/seed.js",
+    "import:aicte": "node src/importAicteInstitutions.js",
+    "create-admin": "node src/createAdmin.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "connect-mongo": "^5.1.0",
     "cors": "^2.8.6",
     "dotenv": "^18.0.9",
     "express": "^5.3.0",
+    "express-rate-limit": "^8.2.1",
+    "express-session": "^1.18.2",
     "helmet": "^8.3.0",
-    "mysql2": "^3.24.6"
+    "mongoose": "^9.11.4"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
