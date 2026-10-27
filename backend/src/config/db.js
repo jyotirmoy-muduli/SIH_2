@@ -1,13 +1,17 @@
-import mongoose from "mongoose";
+import mysql from "mysql2/promise";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-export async function connectDatabase() {
-  const uri =
-    process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/sih_26264";
-  await mongoose.connect(uri);
-  console.log("Connected to MongoDB");
-}
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || "localhost",
+  port: Number(process.env.DB_PORT || 3306),
+  user: process.env.DB_USER || "root",
+  password: process.env.DB_PASSWORD || "",
+  database: process.env.DB_NAME || "sih_26264",
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+});
 
-export default mongoose;
+export default pool;

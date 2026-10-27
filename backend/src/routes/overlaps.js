@@ -1,40 +1,26 @@
+
 import express from "express";
-import mongoose from "mongoose";
-import CaseLink from "../models/CaseLink.js";
-import ComplaintCase from "../models/ComplaintCase.js";
-import "../models/Institution.js";
-import OverlapAlert from "../models/OverlapAlert.js";
+import pool from "../config/db.js";
 import { detectOverlaps } from "../services/overlapDetection.js";
-import { canManageCase, requireRoles } from "../middleware/auth.js";
 
 const router = express.Router();
 
-function parseExplanation(reason) {
-  try {
-    return JSON.parse(reason);
-  } catch {
-    return reason;
-  }
-}
-
 // POST /api/overlaps/scan
-router.post(
-  "/scan",
-  requireRoles("ADMIN", "BUREAU_OFFICER"),
-  async (req, res) => {
+router.post("/scan", async (req, res) => {
   try {
     const result = await detectOverlaps();
+
     res.json({
       success: true,
       message: "Overlap scan completed",
-      data: result,
-      }
-    );
+      data: result
+    });
   } catch (error) {
     console.error("Overlap scan:", error.message);
+
     res.status(500).json({
       success: false,
-      message: "Could not run overlap detection",
+      message: "Could not run overlap detection"
     });
   }
 });
@@ -42,192 +28,206 @@ router.post(
 // GET /api/overlaps?status=PENDING
 router.get("/", async (req, res) => {
   try {
-    const status = String(req.query.status || "PENDING");
+    const { status = "PENDING" } = req.query;
+
     const allowed = ["PENDING", "REVIEWED", "DISMISSED", "ALL"];
+
     if (!allowed.includes(status)) {
       return res.status(400).json({
         success: false,
-        message: "Invalid alert status",
+        message: "Invalid alert status"
       });
     }
 
-    const filter = status === "ALL" ? {} : { status };
-    if (req.user.role === "BUREAU_OFFICER") {
-      const bureauCaseIds = await ComplaintCase.find({
-        bureau_name: req.user.bureau_name,
-      }).distinct("_id");
-      filter.$or = [
-        { case_id: { $in: bureauCaseIds } },
-        { related_case_id: { $in: bureauCaseIds } },
-      ];
-    }
-    const alerts = await OverlapAlert.find(filter)
-      .populate({
-        path: "case_id",
-        select: "case_number subject bureau_name status institution_id",
-        populate: { path: "institution_id", select: "permanent_id institution_name" },
-      })
-      .populate({
-        path: "related_case_id",
-        select: "case_number subject bureau_name status",
-      })
-      .sort({ confidence_score: -1, created_at: -1 });
-    alerts.sort((first, second) => {
-      if (first.status === "PENDING" && second.status !== "PENDING") return -1;
-      if (second.status === "PENDING" && first.status !== "PENDING") return 1;
-      return 0;
+    const where = status === "ALL" ? "" : "WHERE a.status = ?";
+    const params = status === "ALL" ? [] : [status];
+
+    const [rows] = await pool.execute(
+      `SELECT
+         a.id AS alert_id,
+         a.case_id,
+         a.related_case_id,
+         a.alert_reason,
+         a.confidence_score,
+         a.status AS alert_status,
+         a.reviewed_by,
+         a.reviewed_at,
+         a.created_at,
+         c1.case_number AS case_number,
+         c1.subject AS subject,
+         c1.bureau_name AS bureau_name,
+         c1.status AS case_status,
+         c2.case_number AS related_case_number,
+         c2.subject AS related_subject,
+         c2.bureau_name AS related_bureau,
+         i.permanent_id,
+         i.institution_name
+       FROM overlap_alerts a
+       JOIN complaint_cases c1 ON c1.id = a.case_id
+       JOIN complaint_cases c2 ON c2.id = a.related_case_id
+       JOIN institutions i ON i.id = c1.institution_id
+       ${where}
+       ORDER BY
+         CASE WHEN a.status = 'PENDING' THEN 0 ELSE 1 END,
+         a.confidence_score DESC,
+         a.created_at DESC`,
+      params
+    );
+
+    const data = rows.map((row) => {
+      let explanation = row.alert_reason;
+
+      try {
+        explanation = JSON.parse(row.alert_reason);
+      } catch {
+        // Older alerts may contain plain-text explanations.
+      }
+
+      return { ...row, explanation };
     });
 
-    const data = alerts.map((alert) => ({
-      alert_id: alert.id,
-      case_id: alert.case_id.id,
-      related_case_id: alert.related_case_id.id,
-      alert_reason: alert.alert_reason,
-      confidence_score: alert.confidence_score,
-      alert_status: alert.status,
-      reviewed_by: alert.reviewed_by?.toString() || null,
-      reviewed_at: alert.reviewed_at,
-      created_at: alert.created_at,
-      case_number: alert.case_id.case_number,
-      subject: alert.case_id.subject,
-      bureau_name: alert.case_id.bureau_name,
-      case_status: alert.case_id.status,
-      related_case_number: alert.related_case_id.case_number,
-      related_subject: alert.related_case_id.subject,
-      related_bureau: alert.related_case_id.bureau_name,
-      permanent_id: alert.case_id.institution_id.permanent_id,
-      institution_name: alert.case_id.institution_id.institution_name,
-      explanation: parseExplanation(alert.alert_reason),
-    }));
-
-    return res.json({ success: true, count: data.length, data });
+    res.json({
+      success: true,
+      count: data.length,
+      data
+    });
   } catch (error) {
     console.error("Fetch overlap alerts:", error.message);
-    return res.status(500).json({
+
+    res.status(500).json({
       success: false,
-      message: "Could not fetch overlap alerts",
+      message: "Could not fetch overlap alerts"
     });
   }
 });
 
 // PATCH /api/overlaps/:id/review
-router.patch(
-  "/:id/review",
-  requireRoles("ADMIN", "BUREAU_OFFICER"),
-  async (req, res) => {
+router.patch("/:id/review", async (req, res) => {
+  const alertId = Number(req.params.id);
   const { decision, notes = "" } = req.body;
 
-  if (!mongoose.isObjectIdOrHexString(req.params.id)) {
+  if (!Number.isInteger(alertId) || alertId <= 0) {
     return res.status(400).json({
       success: false,
-      message: "Invalid alert ID",
+      message: "Invalid alert ID"
     });
   }
 
   const decisions = ["CONFIRMED", "RELATED", "DISMISSED"];
+
   if (!decisions.includes(decision)) {
     return res.status(400).json({
       success: false,
-      message: "Decision must be CONFIRMED, RELATED or DISMISSED",
+      message: "Decision must be CONFIRMED, RELATED or DISMISSED"
     });
   }
 
-  if (typeof notes !== "string") {
-    return res.status(400).json({
-      success: false,
-      message: "Notes must be a string",
-    });
-  }
+  const connection = await pool.getConnection();
 
   try {
-    const alert = await OverlapAlert.findById(req.params.id);
-    if (!alert) {
-      return res.status(404).json({
-        success: false,
-        message: "Overlap alert not found",
-      });
-    }
-    const complaint = await ComplaintCase.findById(alert.case_id).select(
-      "bureau_name"
+    await connection.beginTransaction();
+
+    const [alerts] = await connection.execute(
+      `SELECT id, case_id, related_case_id, status
+       FROM overlap_alerts
+       WHERE id = ?
+       FOR UPDATE`,
+      [alertId]
     );
-    if (!complaint) {
+
+    if (!alerts.length) {
+      await connection.rollback();
+
       return res.status(404).json({
         success: false,
-        message: "Complaint not found",
+        message: "Overlap alert not found"
       });
     }
-    if (!canManageCase(req, res, complaint)) return;
+
+    const alert = alerts[0];
 
     if (alert.status !== "PENDING") {
+      await connection.rollback();
+
       return res.status(409).json({
         success: false,
-        message: "This alert has already been reviewed",
-        }
-      );
-    }
-
-    if (decision !== "DISMISSED") {
-      await CaseLink.findOneAndUpdate(
-        { case_id: alert.case_id, related_case_id: alert.related_case_id },
-        {
-          $set: {
-            relationship_type:
-              decision === "CONFIRMED"
-                ? "POTENTIAL_DUPLICATE"
-                : "RELATED_COMPLAINT",
-            confidence_score: alert.confidence_score,
-            review_status: "CONFIRMED",
-            reviewed_by: req.user.id,
-            reviewed_at: new Date(),
-          },
-        },
-        { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
-      );
-    }
-
-    const reviewedAlert = await OverlapAlert.findOneAndUpdate(
-      { _id: alert._id, status: "PENDING" },
-      {
-        $set: {
-          status: decision === "DISMISSED" ? "DISMISSED" : "REVIEWED",
-          reviewed_by: req.user.id,
-          reviewed_at: new Date(),
-        },
-      },
-      { new: true }
-    );
-
-    if (!reviewedAlert) {
-      return res.status(409).json({
-        success: false,
-        message: "This alert has already been reviewed",
+        message: "This alert has already been reviewed"
       });
     }
 
-    await ComplaintCase.updateOne(
-      { _id: alert.case_id },
-      {
-        $push: {
-          actions: {
-            action_type: "OVERLAP_REVIEW",
-            notes: `Alert ${alert.id}: ${decision}. ${notes.slice(0, 1000)}`,
-            performed_by: req.user.id,
-          },
-        },
-      }
+    if (decision === "DISMISSED") {
+      await connection.execute(
+        `UPDATE overlap_alerts
+         SET status = 'DISMISSED', reviewed_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [alertId]
+      );
+    } else {
+      const relationshipType =
+        decision === "CONFIRMED"
+          ? "POTENTIAL_DUPLICATE"
+          : "RELATED_COMPLAINT";
+
+      await connection.execute(
+        `INSERT INTO case_links
+         (case_id, related_case_id, relationship_type,
+          confidence_score, review_status, reviewed_at)
+         SELECT ?, ?, ?, a.confidence_score, 'CONFIRMED',
+                CURRENT_TIMESTAMP
+         FROM overlap_alerts a
+         WHERE a.id = ?
+         ON DUPLICATE KEY UPDATE
+           relationship_type = VALUES(relationship_type),
+           confidence_score = VALUES(confidence_score),
+           review_status = 'CONFIRMED',
+           reviewed_at = CURRENT_TIMESTAMP`,
+        [
+          alert.case_id,
+          alert.related_case_id,
+          relationshipType,
+          alertId
+        ]
+      );
+
+      await connection.execute(
+        `UPDATE overlap_alerts
+         SET status = 'REVIEWED', reviewed_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [alertId]
+      );
+    }
+
+    // Keep the officer's review explanation in the case history.
+    await connection.execute(
+      `INSERT INTO case_actions
+       (case_id, action_type, notes)
+       VALUES (?, 'OVERLAP_REVIEW', ?)`,
+      [
+        alert.case_id,
+        `Alert ${alertId}: ${decision}. ${String(notes).slice(0, 1000)}`
+      ]
     );
 
-    return res.json({
+    await connection.commit();
+
+    res.json({
       success: true,
       message: `Alert ${decision.toLowerCase()} successfully`,
-      data: { alert_id: alert.id, decision },
+      data: {
+        alert_id: alertId,
+        decision
+      }
     });
   } catch (error) {
+    await connection.rollback();
     console.error("Review overlap alert:", error.message);
-    return res.status(500).json({
+
+    res.status(500).json({
       success: false,
-      message: "Could not save review decision",
+      message: "Could not save review decision"
     });
+  } finally {
+    connection.release();
   }
 });
 
