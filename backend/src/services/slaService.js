@@ -1,20 +1,27 @@
 
+import { SLA_THRESHOLDS } from "../config/sla.js";
+
 const CLOSED_STATUSES = new Set(["RESOLVED", "CLOSED"]);
 
-const DAY_IN_MS = 24 * 60 * 60 * 1000;
-
-export function calculateSlaRisk(caseRecord, now = new Date()) {
+export function calculateSlaRisk(
+  caseRecord,
+  now = new Date(),
+  thresholds = SLA_THRESHOLDS
+) {
   const status = String(caseRecord.status || "").toUpperCase();
   const priority = String(caseRecord.priority || "MEDIUM").toUpperCase();
+  const statusDescription = status
+    ? `Current status: ${status.toLowerCase().replaceAll("_", " ")}.`
+    : "";
 
-  // Resolved and closed complaints no longer need an active SLA warning.
   if (CLOSED_STATUSES.has(status)) {
     return {
       risk_level: "COMPLETED",
       hours_remaining: null,
       overdue_hours: 0,
       escalation_required: false,
-      recommended_action: "No action required. Complaint is closed."
+      explanation: `This complaint is ${status.toLowerCase()} and is excluded from active SLA escalation.`,
+      recommended_action: "No action required. Complaint is closed.",
     };
   }
 
@@ -24,7 +31,8 @@ export function calculateSlaRisk(caseRecord, now = new Date()) {
       hours_remaining: null,
       overdue_hours: 0,
       escalation_required: false,
-      recommended_action: "Set a due date to enable SLA monitoring."
+      explanation: `${statusDescription}No due date is recorded, so remaining time cannot be calculated.`,
+      recommended_action: "Set and verify a due date to enable SLA monitoring.",
     };
   }
 
@@ -36,7 +44,8 @@ export function calculateSlaRisk(caseRecord, now = new Date()) {
       hours_remaining: null,
       overdue_hours: 0,
       escalation_required: false,
-      recommended_action: "Correct the complaint due date."
+      explanation: `${statusDescription}The stored due date is not a valid date.`,
+      recommended_action: "Correct the complaint due date before assessing its SLA.",
     };
   }
 
@@ -46,35 +55,60 @@ export function calculateSlaRisk(caseRecord, now = new Date()) {
     ? Math.ceil(Math.abs(differenceMs) / (60 * 60 * 1000))
     : 0;
 
-  let riskLevel;
-  let action;
+  const baseRisk =
+    differenceMs < 0
+      ? "OVERDUE"
+      : differenceMs <= thresholds.criticalHours * 60 * 60 * 1000
+        ? "CRITICAL"
+        : differenceMs <= thresholds.atRiskHours * 60 * 60 * 1000
+          ? "AT_RISK"
+          : "ON_TRACK";
+  const riskOrder = ["ON_TRACK", "AT_RISK", "CRITICAL", "OVERDUE"];
+  const riskLevel =
+    priority === "URGENT" && baseRisk !== "OVERDUE"
+      ? riskOrder[Math.min(riskOrder.indexOf(baseRisk) + 1, 2)]
+      : baseRisk;
+  const priorityDescription = `Priority: ${priority.toLowerCase()}.`;
+  const remainingDescription =
+    differenceMs < 0
+      ? `The deadline passed ${overdueHours} hour${overdueHours === 1 ? "" : "s"} ago.`
+      : `There are ${hoursRemaining} hour${hoursRemaining === 1 ? "" : "s"} remaining.`;
+  const priorityEscalation =
+    priority === "URGENT" && baseRisk !== riskLevel
+      ? " Urgent priority raises this case by one risk level."
+      : "";
 
-  if (differenceMs < 0) {
-    riskLevel = "OVERDUE";
-    action = "Escalate to the responsible officer and review the delay.";
-  } else if (differenceMs <= 24 * 60 * 60 * 1000) {
-    riskLevel = "CRITICAL";
-    action = "Prioritize this complaint and review it immediately.";
-  } else if (differenceMs <= 72 * 60 * 60 * 1000) {
-    riskLevel = "AT_RISK";
-    action = "Notify the responsible officer and monitor progress.";
-  } else {
-    riskLevel = "ON_TRACK";
-    action = "Continue normal processing and monitor the deadline.";
-  }
-
-  // Urgent cases receive attention even when their deadline is further away.
   const escalationRequired =
     riskLevel === "OVERDUE" ||
     riskLevel === "CRITICAL" ||
-    priority === "URGENT";
+    (priority === "URGENT" && riskLevel === "AT_RISK");
+  let recommendedAction;
+
+  if (riskLevel === "OVERDUE") {
+    recommendedAction =
+      "Escalate to a supervisor, contact the responsible bureau, and review the delay.";
+  } else if (riskLevel === "CRITICAL") {
+    recommendedAction =
+      "Contact the responsible bureau now and prioritize this complaint for immediate review.";
+  } else if (riskLevel === "AT_RISK") {
+    recommendedAction =
+      "Review progress and contact the responsible bureau to confirm the next action.";
+  } else {
+    recommendedAction = "Continue normal processing and monitor the deadline.";
+  }
+
+  if (status === "AWAITING_RESPONSE" && riskLevel !== "OVERDUE") {
+    recommendedAction =
+      "Follow up with the party expected to respond and update the responsible bureau.";
+  }
 
   return {
     risk_level: riskLevel,
     hours_remaining: hoursRemaining,
     overdue_hours: overdueHours,
     escalation_required: escalationRequired,
-    recommended_action: action
+    explanation: `${remainingDescription} ${statusDescription} ${priorityDescription}${priorityEscalation}`.trim(),
+    recommended_action: recommendedAction,
   };
 }
 

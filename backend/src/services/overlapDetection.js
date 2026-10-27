@@ -1,5 +1,5 @@
-
-import pool from "../config/db.js";
+import ComplaintCase from "../models/ComplaintCase.js";
+import OverlapAlert from "../models/OverlapAlert.js";
 
 const STOP_WORDS = new Set([
   "a", "an", "the", "is", "are", "was", "were", "in", "on",
@@ -12,21 +12,16 @@ const STOP_WORDS = new Set([
 function normalizeToken(token) {
   let word = token.toLowerCase();
 
-  // Small deterministic normalization for the prototype.
   if (word.length > 5 && word.endsWith("ies")) {
     word = `${word.slice(0, -3)}y`;
-  } else if (
-    word.length > 4 &&
-    word.endsWith("s") &&
-    !word.endsWith("ss")
-  ) {
+  } else if (word.length > 4 && word.endsWith("s") && !word.endsWith("ss")) {
     word = word.slice(0, -1);
   }
 
   return word;
 }
 
-function tokenize(text = "") {
+export function tokenize(text = "") {
   return new Set(
     text
       .normalize("NFKD")
@@ -39,173 +34,112 @@ function tokenize(text = "") {
   );
 }
 
-function jaccardSimilarity(first, second) {
-  if (!first.size || !second.size) return 0;
+export function jaccardSimilarity(first, second) {
+  if (!first.size || !second.size) return { score: 0, terms: [] };
 
   const intersection = [...first].filter((word) => second.has(word));
   const union = new Set([...first, ...second]);
-
-  return {
-    score: intersection.length / union.size,
-    terms: intersection
-  };
+  return { score: intersection.length / union.size, terms: intersection };
 }
 
 function compareCases(first, second) {
-  const firstSubject = tokenize(first.subject);
-  const secondSubject = tokenize(second.subject);
-
-  const firstDescription = tokenize(first.description);
-  const secondDescription = tokenize(second.description);
-
-  const subjectMatch = jaccardSimilarity(firstSubject, secondSubject);
-  const descriptionMatch = jaccardSimilarity(
-    firstDescription,
-    secondDescription
+  const subjectMatch = jaccardSimilarity(
+    tokenize(first.subject),
+    tokenize(second.subject)
   );
-
-  // Subject similarity carries more weight than description similarity.
+  const descriptionMatch = jaccardSimilarity(
+    tokenize(first.description),
+    tokenize(second.description)
+  );
   const score = Math.round(
     (0.7 * subjectMatch.score + 0.3 * descriptionMatch.score) * 100
   );
-
   const matchingTerms = [
-    ...new Set([
-      ...subjectMatch.terms,
-      ...descriptionMatch.terms
-    ])
+    ...new Set([...subjectMatch.terms, ...descriptionMatch.terms]),
   ];
-
   const reasons = [];
 
-  if (subjectMatch.score > 0) {
-    reasons.push("Similar subject wording");
-  }
-
-  if (descriptionMatch.score > 0) {
-    reasons.push("Shared description terms");
-  }
-
+  if (subjectMatch.score > 0) reasons.push("Similar subject wording");
+  if (descriptionMatch.score > 0) reasons.push("Shared description terms");
   reasons.push("Same institution, different bureaus");
 
-  return {
-    score,
-    matchingTerms,
-    reasons
-  };
+  return { score, matchingTerms, reasons };
 }
 
 export async function detectOverlaps() {
-  const [cases] = await pool.execute(`
-    SELECT
-      id, case_number, institution_id, subject, description,
-      bureau_name, status
-    FROM complaint_cases
-    WHERE status NOT IN ('CLOSED')
-    ORDER BY institution_id, id
-  `);
-
+  const cases = await ComplaintCase.find({ status: { $ne: "CLOSED" } })
+    .select("case_number institution_id subject description bureau_name status")
+    .sort({ institution_id: 1, _id: 1 })
+    .lean();
   const groups = new Map();
 
   for (const item of cases) {
-    if (!groups.has(item.institution_id)) {
-      groups.set(item.institution_id, []);
-    }
-
-    groups.get(item.institution_id).push(item);
+    const institutionId = item.institution_id.toString();
+    if (!groups.has(institutionId)) groups.set(institutionId, []);
+    groups.get(institutionId).push(item);
   }
 
   const candidates = [];
-
   for (const group of groups.values()) {
     for (let i = 0; i < group.length; i += 1) {
       for (let j = i + 1; j < group.length; j += 1) {
         const first = group[i];
         const second = group[j];
-
         if (first.bureau_name === second.bureau_name) continue;
 
         const comparison = compareCases(first, second);
-
-        // A transparent prototype threshold; tune using reviewed examples.
         if (comparison.score < 15) continue;
+        candidates.push({ first, second, ...comparison });
+      }
+    }
+  }
 
-        candidates.push({
-          first,
-          second,
-          ...comparison
+  for (const candidate of candidates) {
+    const { first, second, score, matchingTerms, reasons } = candidate;
+    const [lowId, highId] = [first._id, second._id].sort((a, b) =>
+      a.toString().localeCompare(b.toString())
+    );
+    const reason = JSON.stringify({
+      explanation: reasons,
+      matching_terms: matchingTerms,
+      algorithm: "weighted_jaccard_v1",
+    });
+    const existing = await OverlapAlert.findOne({
+      case_id: lowId,
+      related_case_id: highId,
+    });
+
+    if (existing?.status === "PENDING") {
+      existing.alert_reason = reason;
+      existing.confidence_score = score;
+      await existing.save();
+    } else if (!existing) {
+      try {
+        await OverlapAlert.create({
+          case_id: lowId,
+          related_case_id: highId,
+          alert_reason: reason,
+          confidence_score: score,
+          status: "PENDING",
         });
+      } catch (error) {
+        if (error.code !== 11000) throw error;
       }
     }
   }
 
-  const connection = await pool.getConnection();
-
-  try {
-    await connection.beginTransaction();
-
-    for (const candidate of candidates) {
-      const { first, second, score, matchingTerms, reasons } = candidate;
-
-      const reason = JSON.stringify({
-        explanation: reasons,
-        matching_terms: matchingTerms,
-        algorithm: "weighted_jaccard_v1"
-      });
-
-      // Store each pair in a consistent order to avoid reversed duplicates.
-      const lowId = Math.min(first.id, second.id);
-      const highId = Math.max(first.id, second.id);
-
-      const [existing] = await connection.execute(
-        `SELECT id, status
-         FROM overlap_alerts
-         WHERE case_id = ? AND related_case_id = ?
-         LIMIT 1`,
-        [lowId, highId]
-      );
-
-      if (existing.length) {
-        // Preserve decisions already made by an officer.
-        if (existing[0].status === "PENDING") {
-          await connection.execute(
-            `UPDATE overlap_alerts
-             SET alert_reason = ?, confidence_score = ?
-             WHERE id = ?`,
-            [reason, score, existing[0].id]
-          );
-        }
-      } else {
-        await connection.execute(
-          `INSERT INTO overlap_alerts
-           (case_id, related_case_id, alert_reason,
-            confidence_score, status)
-           VALUES (?, ?, ?, ?, 'PENDING')`,
-          [lowId, highId, reason, score]
-        );
-      }
-    }
-
-    await connection.commit();
-
-    return {
-      cases_scanned: cases.length,
-      candidates_found: candidates.length,
-      candidates: candidates.map((item) => ({
-        case_number: item.first.case_number,
-        related_case_number: item.second.case_number,
-        institution_id: item.first.institution_id,
-        bureau_a: item.first.bureau_name,
-        bureau_b: item.second.bureau_name,
-        similarity_score: item.score,
-        matching_terms: item.matchingTerms,
-        reasons: item.reasons
-      }))
-    };
-  } catch (error) {
-    await connection.rollback();
-    throw error;
-  } finally {
-    connection.release();
-  }
+  return {
+    cases_scanned: cases.length,
+    candidates_found: candidates.length,
+    candidates: candidates.map((item) => ({
+      case_number: item.first.case_number,
+      related_case_number: item.second.case_number,
+      institution_id: item.first.institution_id.toString(),
+      bureau_a: item.first.bureau_name,
+      bureau_b: item.second.bureau_name,
+      similarity_score: item.score,
+      matching_terms: item.matchingTerms,
+      reasons: item.reasons,
+    })),
+  };
 }
